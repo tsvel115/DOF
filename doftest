@@ -1,0 +1,250 @@
+-- DOF Test Panel (client-side, untuk executor)
+local Lighting = game:GetService("Lighting")
+local UIS = game:GetService("UserInputService")
+local RS = game:GetService("RunService")
+local Players = game:GetService("Players")
+
+-- ===== DOF =====
+local function findOurs()
+    for _, p in ipairs({Lighting, workspace.CurrentCamera}) do
+        local e = p:FindFirstChild("TestDOF")
+        if e then return e end
+    end
+end
+
+local dof = findOurs() or Instance.new("DepthOfFieldEffect")
+dof.Name = "TestDOF"
+dof.Parent = dof.Parent or Lighting
+
+local DEFAULTS = {far = 0.8, near = 0, focus = 20, radius = 10}
+local cfg = {far = DEFAULTS.far, near = DEFAULTS.near, focus = DEFAULTS.focus, radius = DEFAULTS.radius}
+local parentMode = (dof.Parent == Lighting) and "Lighting" or "Camera"
+local lock = false
+
+local function target()
+    return parentMode == "Camera" and workspace.CurrentCamera or Lighting
+end
+
+local function apply()
+    dof.Enabled = true
+    dof.FarIntensity = cfg.far
+    dof.NearIntensity = cfg.near
+    dof.FocusDistance = cfg.focus
+    dof.InFocusRadius = cfg.radius
+end
+apply()
+
+local function otherDOFs()
+    local list = {}
+    for _, p in ipairs({Lighting, workspace.CurrentCamera}) do
+        for _, e in ipairs(p:GetChildren()) do
+            if e:IsA("DepthOfFieldEffect") and e ~= dof then
+                table.insert(list, e)
+            end
+        end
+    end
+    return list
+end
+
+local function countActiveOthers()
+    local n = 0
+    for _, e in ipairs(otherDOFs()) do
+        if e.Enabled then n = n + 1 end
+    end
+    return n
+end
+
+local function killOthers()
+    for _, e in ipairs(otherDOFs()) do
+        e.Enabled = false
+    end
+end
+
+local function quality()
+    local ok, q = pcall(function() return settings().Rendering.QualityLevel end)
+    if not ok then return "?" end
+    return (tostring(q):gsub("Enum.QualityLevel.", ""))
+end
+
+-- Mode kunci: terapkan ulang nilai tiap frame kalau game menimpa
+RS.Heartbeat:Connect(function()
+    if not lock then return end
+    if dof.Parent ~= target() then dof.Parent = target() end
+    apply()
+    killOthers()
+end)
+
+-- ===== GUI =====
+local sg = Instance.new("ScreenGui")
+sg.Name = "DOFTestPanel"
+sg.ResetOnSpawn = false
+local holder
+local ok = pcall(function() holder = (gethui and gethui()) or game:GetService("CoreGui") end)
+if not ok or not holder then holder = Players.LocalPlayer:WaitForChild("PlayerGui") end
+local old = holder:FindFirstChild("DOFTestPanel")
+if old then old:Destroy() end
+sg.Parent = holder
+
+local panel = Instance.new("ScrollingFrame")
+panel.Size = UDim2.new(0, 250, 0, 300)
+panel.Position = UDim2.new(0, 20, 0.15, 0)
+panel.CanvasSize = UDim2.new(0, 0, 0, 362)
+panel.ScrollBarThickness = 4
+panel.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+panel.Parent = sg
+
+local tbtn = Instance.new("TextButton")
+tbtn.Size = UDim2.new(0, 36, 0, 36)
+tbtn.Position = UDim2.new(0, 20, 0.15, -42)
+tbtn.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+tbtn.TextColor3 = Color3.new(1, 1, 1)
+tbtn.TextSize = 20
+tbtn.Text = "☰"
+tbtn.Parent = sg
+tbtn.MouseButton1Click:Connect(function() panel.Visible = not panel.Visible end)
+UIS.InputBegan:Connect(function(input, gpe)
+    if not gpe and input.KeyCode == Enum.KeyCode.RightShift then
+        panel.Visible = not panel.Visible
+    end
+end)
+
+-- Info status (nilai asli dari objek DOF, supaya ketahuan kalau ditimpa game)
+local info = Instance.new("TextLabel")
+info.Size = UDim2.new(1, -20, 0, 50)
+info.Position = UDim2.new(0, 10, 0, 6)
+info.BackgroundTransparency = 1
+info.TextColor3 = Color3.fromRGB(180, 220, 255)
+info.TextSize = 12
+info.TextWrapped = true
+info.TextXAlignment = Enum.TextXAlignment.Left
+info.TextYAlignment = Enum.TextYAlignment.Top
+info.Parent = panel
+
+task.spawn(function()
+    while sg.Parent do
+        info.Text = string.format(
+            "Enabled: %s | Parent: %s\nQuality: %s | DOF lain aktif: %d\nNyata -> Far %.2f | Focus %.0f | Radius %.0f",
+            tostring(dof.Enabled), dof.Parent and dof.Parent.Name or "nil", quality(),
+            countActiveOthers(), dof.FarIntensity, dof.FocusDistance, dof.InFocusRadius)
+        task.wait(0.5)
+    end
+end)
+
+-- Slider
+local refreshers = {}
+local function mkSlider(name, key, min, max, y)
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(1, -20, 0, 16)
+    label.Position = UDim2.new(0, 10, 0, y)
+    label.BackgroundTransparency = 1
+    label.TextColor3 = Color3.new(1, 1, 1)
+    label.TextSize = 13
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.Parent = panel
+
+    local bar = Instance.new("Frame")
+    bar.Size = UDim2.new(1, -30, 0, 14)
+    bar.Position = UDim2.new(0, 10, 0, y + 20)
+    bar.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+    bar.Parent = panel
+
+    local fill = Instance.new("Frame")
+    fill.BackgroundColor3 = Color3.fromRGB(0, 170, 255)
+    fill.BorderSizePixel = 0
+    fill.Parent = bar
+
+    local function show()
+        local alpha = math.clamp((cfg[key] - min) / (max - min), 0, 1)
+        fill.Size = UDim2.new(alpha, 0, 1, 0)
+        label.Text = string.format("%s: %.2f", name, cfg[key])
+    end
+    local function fromInput(input)
+        local alpha = math.clamp((input.Position.X - bar.AbsolutePosition.X) / bar.AbsoluteSize.X, 0, 1)
+        cfg[key] = min + (max - min) * alpha
+        apply()
+        show()
+    end
+
+    local dragging = false
+    bar.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            panel.ScrollingEnabled = false
+            fromInput(input)
+        end
+    end)
+    UIS.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+        or input.UserInputType == Enum.UserInputType.Touch) then
+            fromInput(input)
+        end
+    end)
+    UIS.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+            panel.ScrollingEnabled = true
+        end
+    end)
+
+    show()
+    table.insert(refreshers, show)
+end
+
+mkSlider("Far (blur jauh)", "far", 0, 1, 60)
+mkSlider("Near (blur dekat)", "near", 0, 1, 104)
+mkSlider("Focus Distance", "focus", 0, 300, 148)
+mkSlider("In Focus Radius", "radius", 0, 100, 192)
+
+local function refreshAll()
+    for _, f in ipairs(refreshers) do f() end
+end
+
+-- Tombol
+local function mkBtn(text, x, y, w)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(0, w, 0, 32)
+    b.Position = UDim2.new(0, x, 0, y)
+    b.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+    b.TextColor3 = Color3.new(1, 1, 1)
+    b.TextSize = 12
+    b.Text = text
+    b.Parent = panel
+    return b
+end
+
+local testBtn = mkBtn("Tes Blur MAX", 10, 244, 108)
+testBtn.MouseButton1Click:Connect(function()
+    cfg.far, cfg.near, cfg.focus, cfg.radius = 1, 1, 0, 0
+    apply()
+    refreshAll()
+end)
+
+local resetBtn = mkBtn("Reset", 126, 244, 104)
+resetBtn.MouseButton1Click:Connect(function()
+    cfg.far, cfg.near, cfg.focus, cfg.radius = DEFAULTS.far, DEFAULTS.near, DEFAULTS.focus, DEFAULTS.radius
+    apply()
+    refreshAll()
+end)
+
+local parentBtn = mkBtn("Parent: " .. parentMode, 10, 282, 108)
+parentBtn.MouseButton1Click:Connect(function()
+    parentMode = (parentMode == "Lighting") and "Camera" or "Lighting"
+    dof.Parent = target()
+    apply()
+    parentBtn.Text = "Parent: " .. parentMode
+end)
+
+local lockBtn = mkBtn("Kunci: OFF", 126, 282, 104)
+lockBtn.MouseButton1Click:Connect(function()
+    lock = not lock
+    lockBtn.Text = "Kunci: " .. (lock and "ON" or "OFF")
+    lockBtn.BackgroundColor3 = lock and Color3.fromRGB(0, 120, 60) or Color3.fromRGB(50, 50, 50)
+end)
+
+local killBtn = mkBtn("Matikan DOF lain", 10, 320, 220)
+killBtn.MouseButton1Click:Connect(function()
+    killOthers()
+    apply()
+end)
