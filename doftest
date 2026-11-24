@@ -38,7 +38,7 @@ cc.Enabled, bloom.Enabled, rays.Enabled = true, true, true
 -- DOF: instance sendiri, nilai awal langsung terlihat (dekat tajam, jauh blur)
 local DOF_DEF = {far = 0.8, near = 0, focus = 20, radius = 10}
 local dofParentMode = (dof.Parent == Lighting) and "Lighting" or "Camera"
-local dofLock = false
+local dofLock = true
 
 local function dofTarget()
     return dofParentMode == "Camera" and workspace.CurrentCamera or Lighting
@@ -83,14 +83,27 @@ RS.Heartbeat:Connect(function()
 end)
 
 local S = {}
-local function add(name, min, max, o, p)
-    table.insert(S, {name, min, max, function() return o[p] end, function(v) o[p] = v end})
+local saved = {} -- nilai slider yang sudah kamu atur (dipakai ulang setelah ganti map)
+
+-- Objek diambil saat dipakai (bukan disimpan), supaya tetap benar kalau efeknya dibuat ulang
+local getObj = {
+    cc     = function() return cc end,
+    bloom  = function() return bloom end,
+    rays   = function() return rays end,
+    atm    = function() return atm end,
+    clouds = function() return clouds end,
+    light  = function() return Lighting end,
+}
+
+local function add(name, min, max, key, p)
+    local f = getObj[key]
+    table.insert(S, {name, min, max, function() return f()[p] end, function(v) f()[p] = v end})
 end
 
 -- Warna
-add("Saturation", -1, 2, cc, "Saturation")
-add("Contrast", -1, 1, cc, "Contrast")
-add("Brightness", -1, 1, cc, "Brightness")
+add("Saturation", -1, 2, "cc", "Saturation")
+add("Contrast", -1, 1, "cc", "Contrast")
+add("Brightness", -1, 1, "cc", "Brightness")
 for _, ch in ipairs({"R", "G", "B"}) do
     table.insert(S, {"Tint " .. ch, 0, 1,
         function() return cc.TintColor[ch] end,
@@ -101,15 +114,15 @@ for _, ch in ipairs({"R", "G", "B"}) do
 end
 
 -- Matahari & cahaya
-add("Time of Day", 0, 24, Lighting, "ClockTime")
-add("Sun Brightness", 0, 10, Lighting, "Brightness")
-add("Exposure", -3, 3, Lighting, "ExposureCompensation")
-add("Sun Glare", 0, 10, atm, "Glare")
-add("Sun Rays", 0, 1, rays, "Intensity")
-add("Rays Spread", 0, 1, rays, "Spread")
-add("Bloom", 0, 3, bloom, "Intensity")
-add("Bloom Size", 0, 56, bloom, "Size")
-add("Bloom Threshold", 0, 4, bloom, "Threshold")
+add("Time of Day", 0, 24, "light", "ClockTime")
+add("Sun Brightness", 0, 10, "light", "Brightness")
+add("Exposure", -3, 3, "light", "ExposureCompensation")
+add("Sun Glare", 0, 10, "atm", "Glare")
+add("Sun Rays", 0, 1, "rays", "Intensity")
+add("Rays Spread", 0, 1, "rays", "Spread")
+add("Bloom", 0, 3, "bloom", "Intensity")
+add("Bloom Size", 0, 56, "bloom", "Size")
+add("Bloom Threshold", 0, 4, "bloom", "Threshold")
 
 -- DOF
 local function addDOF(name, min, max, key, prop)
@@ -127,11 +140,54 @@ addDOF("DOF Focus Dist", 0, 300, "focus", "FocusDistance")
 addDOF("DOF Radius", 0, 100, "radius", "InFocusRadius")
 
 -- Fog & awan
-add("Fog Density", 0, 1, atm, "Density")
-add("Fog Haze", 0, 10, atm, "Haze")
-add("Fog Offset", 0, 1, atm, "Offset")
-add("Cloud Cover", 0, 1, clouds, "Cover")
-add("Cloud Density", 0, 1, clouds, "Density")
+add("Fog Density", 0, 1, "atm", "Density")
+add("Fog Haze", 0, 10, "atm", "Haze")
+add("Fog Offset", 0, 1, "atm", "Offset")
+add("Cloud Cover", 0, 1, "clouds", "Cover")
+add("Cloud Density", 0, 1, "clouds", "Density")
+
+-- ===== Lantai basah (Reflectance) - hanya terlihat di layarmu =====
+local wet, wetMat = 0, true
+local wetScanned, needScan, needUpdate = false, false, false
+local floors = setmetatable({}, {__mode = "k"}) -- part -> {Reflectance asli, Material asli}
+local pendingParts = {}
+
+local function isFloor(p)
+    if not p:IsA("BasePart") or p:IsA("Terrain") then return false end
+    local s = p.Size
+    if p.Transparency >= 0.95 or s.Y > 8 or s.X < 10 or s.Z < 10 then return false end
+    if math.abs(p.CFrame.UpVector.Y) < 0.9 then return false end
+    local m = p:FindFirstAncestorOfClass("Model")
+    if m and Players:GetPlayerFromCharacter(m) then return false end
+    return true
+end
+
+local function wetPart(p)
+    if not isFloor(p) then return end
+    if not floors[p] then floors[p] = {p.Reflectance, p.Material} end
+    p.Reflectance = wet
+    if wetMat then p.Material = Enum.Material.SmoothPlastic end
+end
+
+local function setWet(v)
+    if v == wet then return end
+    wet = v
+    if v > 0 and not wetScanned then needScan = true end
+    needUpdate = true
+end
+
+local function wetRestore()
+    for p, o in pairs(floors) do
+        if p.Parent then
+            p.Reflectance = o[1]
+            p.Material = o[2]
+        end
+    end
+    table.clear(floors)
+    wetScanned = false
+end
+
+table.insert(S, {"Lantai Basah", 0, 1, function() return wet end, setWet})
 
 -- GUI
 local sg = Instance.new("ScreenGui")
@@ -200,7 +256,10 @@ for i, s in ipairs(S) do
     local function set(alpha, apply)
         alpha = math.clamp(alpha, 0, 1)
         local v = min + (max - min) * alpha
-        if apply then setv(v) end
+        if apply then
+            setv(v)
+            saved[name] = v
+        end
         fill.Size = UDim2.new(alpha, 0, 1, 0)
         label.Text = string.format("%s: %.2f", name, v)
     end
@@ -284,7 +343,8 @@ parentBtn.MouseButton1Click:Connect(function()
     parentBtn.Text = "Parent: " .. dofParentMode
 end)
 
-local lockBtn = mkPanelBtn("Kunci: OFF", 118, by + 58, 100)
+local lockBtn = mkPanelBtn("Kunci: ON", 118, by + 58, 100)
+lockBtn.BackgroundColor3 = Color3.fromRGB(0, 120, 60)
 lockBtn.MouseButton1Click:Connect(function()
     dofLock = not dofLock
     lockBtn.Text = "Kunci: " .. (dofLock and "ON" or "OFF")
@@ -297,7 +357,123 @@ killBtn.MouseButton1Click:Connect(function()
     setDOF(dofVals.far, dofVals.near, dofVals.focus, dofVals.radius)
 end)
 
-sf.CanvasSize = UDim2.new(0, 0, 0, by + 134)
+local matBtn = mkPanelBtn("Material kilap: ON", 10, by + 130, 208)
+matBtn.MouseButton1Click:Connect(function()
+    wetMat = not wetMat
+    matBtn.Text = "Material kilap: " .. (wetMat and "ON" or "OFF")
+    needUpdate = true
+end)
+
+sf.CanvasSize = UDim2.new(0, 0, 0, by + 174)
+
+-- Worker lantai basah: scan sekali, lalu hanya memproses part baru (misalnya map baru)
+workspace.DescendantAdded:Connect(function(d)
+    if wet > 0 and d:IsA("BasePart") then table.insert(pendingParts, d) end
+end)
+
+task.spawn(function()
+    while sg.Parent do
+        pcall(function()
+            if wet <= 0 then
+                if wetScanned then wetRestore() end
+                needScan, needUpdate = false, false
+            elseif needScan then
+                needScan, needUpdate, wetScanned = false, false, true
+                local n = 0
+                for _, d in ipairs(workspace:GetDescendants()) do
+                    if d:IsA("BasePart") then wetPart(d) end
+                    n = n + 1
+                    if n % 500 == 0 then task.wait() end
+                end
+            elseif needUpdate then
+                needUpdate = false
+                for p, o in pairs(floors) do
+                    if p.Parent then
+                        p.Reflectance = wet
+                        p.Material = wetMat and Enum.Material.SmoothPlastic or o[2]
+                    end
+                end
+            end
+            if wet > 0 and #pendingParts > 0 then
+                local list = pendingParts
+                pendingParts = {}
+                for _, p in ipairs(list) do
+                    if p.Parent then wetPart(p) end
+                end
+            end
+        end)
+        task.wait(0.5)
+    end
+end)
+
+-- ===== Tahan banting saat ganti map =====
+-- Game sering menghapus/mengganti efek di Lighting saat ganti map. Script ini
+-- membuat ulang efeknya dan menerapkan lagi nilai slider yang sudah kamu atur.
+local function ensureEffects()
+    if not (cc and cc.Parent == Lighting) then cc = get("ColorCorrectionEffect", Lighting) end
+    if not (bloom and bloom.Parent == Lighting) then bloom = get("BloomEffect", Lighting) end
+    if not (rays and rays.Parent == Lighting) then rays = get("SunRaysEffect", Lighting) end
+    if not (atm and atm.Parent == Lighting) then atm = get("Atmosphere", Lighting) end
+    local terrain = workspace:FindFirstChildOfClass("Terrain")
+    if terrain and not (clouds and clouds.Parent == terrain) then
+        clouds = get("Clouds", terrain)
+    end
+    if not (dof and dof.Parent == dofTarget()) then
+        local c = workspace.CurrentCamera
+        dof = Lighting:FindFirstChild("TestDOF")
+            or (c and c:FindFirstChild("TestDOF"))
+            or Instance.new("DepthOfFieldEffect")
+        dof.Name = "TestDOF"
+        dof.Parent = dofTarget()
+    end
+    cc.Enabled, bloom.Enabled, rays.Enabled = true, true, true
+end
+
+local function reapplySaved()
+    for _, s in ipairs(S) do
+        local v = saved[s[1]]
+        if v ~= nil then pcall(s[5], v) end
+    end
+end
+
+local function killDupes()
+    for _, e in ipairs(Lighting:GetChildren()) do
+        if (e:IsA("ColorCorrectionEffect") and e ~= cc)
+        or (e:IsA("BloomEffect") and e ~= bloom)
+        or (e:IsA("SunRaysEffect") and e ~= rays) then
+            e.Enabled = false
+        end
+    end
+end
+
+local busy = false
+local function maintain()
+    if busy then return end
+    busy = true
+    pcall(function()
+        ensureEffects()
+        reapplySaved()
+        setDOF(dofVals.far, dofVals.near, dofVals.focus, dofVals.radius)
+        if dofLock then
+            killOtherDOFs()
+            killDupes()
+        end
+    end)
+    busy = false
+end
+
+task.spawn(function()
+    while sg.Parent do
+        maintain()
+        task.wait(0.25)
+    end
+end)
+Lighting.ChildRemoved:Connect(function() task.defer(maintain) end)
+Lighting.ChildAdded:Connect(function() task.defer(maintain) end)
+workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+    cam = workspace.CurrentCamera
+    task.defer(maintain)
+end)
 
 -- FREECAM
 local fcOn = false
